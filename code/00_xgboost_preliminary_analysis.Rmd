@@ -1,0 +1,450 @@
+---
+title: "Conditional Mortality Model"
+author: "Byron Jaeger"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 12, 
+  fig.height = 8,
+  fig.retina = 3
+)
+
+library(tidyverse)
+library(tidyselect)
+library(tidymodels)
+library(xgboost)
+library(magrittr)
+library(pec)
+library(knitr)
+library(kableExtra)
+library(survival)
+
+
+thm  <- theme_bw() + 
+  theme(
+    text = element_text(size=18, face = 'bold'),
+    panel.grid = element_blank(),
+    panel.grid.major.y = element_line(linetype=2,colour = 'grey80')
+  )
+
+theme_set(thm)
+
+set.seed(329)
+
+```
+
+# Overview
+
+This document contains code and results that described a preliminary analysis of conditional mortality models based on baseline and one-week follow up data from INTERMACS.
+
+# Data import
+
+This section sets up data for the preliminary analysis. The data are processed for xgboost functions. The major steps are: 
+
+1. Set all names to lower case
+2. Remove constant columns
+3. Rename death and time until death as `status` and `time`
+4. Remove identifying information and columns that indicate missing value
+
+Minor steps are to create an outcome variable for `xgboost` models, to log-transform a couple of skewed continuous variables, and to ensure all factor variables are set as characters.
+
+```{r}
+
+pimd_m025 <- read_csv("data/full/dead_M0_25MD.csv", guess_max = 20000) %>% 
+  mutate_if(is.character, as.factor) %>% 
+  mutate_if(is.factor, fct_explicit_na)
+
+label <- pimd_m025$time
+label[pimd_m025$status == 0] %<>% multiply_by(-1) 
+
+# tuning parameters for xgboost
+params <- list(
+  objective='survival:cox',
+  eval_metric='cox-nloglik',
+  eta = 0.01,
+  max_depth = 5L,
+  gamma = 2,
+  min_child_weight = 3L,
+  subsample = 2/3,
+  colsample_bynode = 1/9
+)
+
+# models are evaluated at 1, 2, ... , and 48 months 
+eval.times = c(1, 3, 6, 12)
+
+```
+
+# Analysis parameters
+
+We develop three models:
+
+1. *Pre-implant + Week 1* includes all predictors at pre-implant and 1 week follow-up.
+
+2. *Week 1 only*: includes only predictors at pre-implant.
+
+3. *Pre-implant only*: includes only predictors at pre-implant.
+
+**Important** We create `eval.times`, the vector holding times that models will be evaluated, so that it contains the integers from 1 to 48. This means models are evaluated every 1 month for 4 years, starting at month 1. 
+
+```{r, warning=FALSE}
+
+# ftr = all features for predictive models
+ftr = setdiff(names(pimd_m025), c('time','status'))
+
+pimd_ftr_m0 <- vars_select(ftr, starts_with("m0"))
+pimd_ftr_w1 <- vars_select(ftr, starts_with("m0_25"))
+pimd_ftr_m0 %<>% setdiff(pimd_ftr_w1)
+
+formulas <- list(
+  m0 = pimd_ftr_m0,
+  w1 = pimd_ftr_w1,
+  m0_w1 = ftr
+) %>% 
+  map(~paste0("~", paste(.x, collapse = ' + '))) %>% 
+  map(as.formula)
+
+trn_obs <- which(pimd_m025$m0_impl_yr %in% c(2012, 2013, 2014, 2015))
+tst_obs <- which(pimd_m025$m0_impl_yr %in% c(2016, 2017))
+
+data_dflt <- list(
+  trn = pimd_m025[trn_obs, ], 
+  tst = pimd_m025[tst_obs, ]
+)
+
+# formula = formulas$m0
+# .trn = data_dflt$trn
+# .tst = data_dflt$tst
+
+eval_model_mdf <- function(formula, .trn, .tst){
+    
+    reci <- recipe(formula, data = .trn) %>% 
+      step_nzv(all_predictors()) %>% 
+      step_dummy(all_nominal()) %>% 
+      prep()
+    
+    trn <- juice(reci)
+    tst <- bake(reci, new_data = .tst)
+    
+    xgb_cv <- xgb.cv(
+      params = params, 
+      data = as.matrix(trn),
+      label = label[trn_obs],
+      nrounds = 2000,
+      early_stopping_rounds = 100,
+      print_every_n = 100,
+      nfold = 10
+    )
+    
+    nrounds <- xgb_cv$best_iteration
+    
+    xgb_fit <- xgboost(
+      params = params, 
+      data = as.matrix(trn),
+      label = label[trn_obs],
+      nrounds = nrounds
+    )
+    
+    trn_prds <- predict(
+      object = xgb_fit, 
+      newdata = as.matrix(trn),
+      outputmargin = TRUE
+    )
+    
+    bh <- gbm::basehaz.gbm(
+      t = abs(label[trn_obs]),
+      delta = as.numeric(label[trn_obs]>0),
+      f.x = trn_prds,
+      t.eval = eval.times,
+      smooth = TRUE,
+      cumulative = TRUE
+    )
+    
+    prd <- predict(
+      xgb_fit,
+      newdata = as.matrix(tst),
+      outputmargin = TRUE
+    )
+    
+    prb <- matrix(
+      data = 0, 
+      nrow=nrow(tst), 
+      ncol=length(eval.times)
+    )
+    
+    for(i in 1:ncol(prb)){
+      prb[,i] <- exp(-exp(prd) * bh[i])
+    }
+    
+    eval_data <- tibble(
+      time = abs(label[tst_obs]),
+      status = as.numeric(label[tst_obs]>0)
+    )
+    
+    cstat <- cindex(
+      object = prb,
+      formula = Surv(time, status) ~ 1,
+      data = eval_data,
+      cens.model = 'cox',
+      eval.times = eval.times
+    )
+    
+    bstat <- pec(
+      object = prb,
+      formula = Surv(time, status) ~ 1,
+      data = eval_data,
+      cens.model = 'cox',
+      exact = FALSE,
+      start = eval.times[1],
+      maxtime = eval.times[length(eval.times)],
+      times = eval.times
+    ) %>% 
+      ibs()
+    
+    list(
+      cstat = mean(cstat$AppCindex$matrix),
+      bstat = 1 - bstat[2,] / bstat[1,]
+    )
+    
+}
+
+
+eval_w1 <- eval_model_mdf(formulas$w1, data_dflt$trn, data_dflt$tst)
+
+```
+
+# Model evaluation
+
+Models are fitted using the exact same process and training data:
+
+1. ten-fold cross validation is applied to determine an optimal number of boosting steps. 
+
+2. A boosting model is developed using the number of steps determined in 
+
+```{r}
+
+tmp = output %>% 
+  bind_rows(.id = 'ftr') %>% 
+  mutate(survival_probs = map(model, 'survival_probs')) %>% 
+  mutate(
+    concordance = map(
+      .x = survival_probs,
+      .f = ~ pec::cindex(
+        object = .x,
+        formula = Surv(time, status) ~ 1,
+        cens.model = 'cox',
+        data = data_dflt$tst,
+        eval.times = eval.times
+      ) 
+    ),
+    cindex = map_dbl(
+      concordance, 
+      ~.x$AppCindex$matrix[eval.times==12]
+    ),
+    int_brier = map(
+      .x = survival_probs, 
+      .f = ~ pec::pec(
+        object = .x,
+        formula = Surv(time, status) ~ 1,
+        cens.model = 'cox',
+        data = data_dflt$tst,
+        exact = FALSE,
+        times = eval.times,
+        start = eval.times[1],
+        maxtime = eval.times[length(eval.times)]
+      )
+    ),
+    scaled_brier = map_dbl(
+      .x = int_brier,
+      .f = ~ ibs(.x) %>% 
+        tibble(
+          name = rownames(.),
+          value = as.numeric(.)
+        ) %>% 
+        dplyr::select(name, value) %>% 
+        mutate(value = 1 - value / value[name=='Reference']) %>% 
+        filter(name!='Reference') %>% 
+        pull(value)
+    )
+  )
+
+
+tmp %>% arrange(desc(scaled_brier))
+
+
+
+
+
+```
+
+Predictions are evaluated at `eval.times` according to concordance and Brier score. For calibration, we evaluate the models at 1 year following the surgery.
+
+```{r}
+
+calib_obj <- tmp$survival_probs %>% 
+  map(~.x[,12]) %>% 
+  set_names(
+    paste(tmp$ftr, tmp$miss_algo, tmp$miss_strat, sep='_')
+  )
+
+calib <- pec::calPlot(
+  object = calib_obj, 
+  time = eval.times[12],
+  plot = FALSE,
+  method = 'quantile',
+  formula = Surv(time, status) ~ 1,
+  data = data_dflt$tst
+)
+
+cal_stat <- calib$plotFrames %>% 
+  bind_rows(.id = 'name') %>% 
+  as_tibble() %>% 
+  group_by(name) %>% 
+  summarize(value = sqrt(mean((Pred-Obs)^2)))
+
+calib$plotFrames %>% 
+  bind_rows(.id = 'model') %>% 
+  as_tibble() %>% 
+  ggplot(aes(x=Pred, y=Obs, col = model)) + 
+  geom_line() + 
+  geom_abline(slope = 1, intercept = 0)
+
+```
+
+Results from this procedure are tabulated using `kable`.
+
+```{r}
+
+bind_cols(concordance, int_brier, cal_stat) %>% 
+  gather(variable, value) %>% 
+  mutate(variable = gsub("m0_w1", "m0w1", variable)) %>% 
+  separate(variable, into = c('stat', 'ftr')) %>% 
+  spread(stat, value) %>% 
+  mutate(
+    ftr = factor(
+      ftr, 
+      levels = c("m0w1", "w1", "m0"),
+      labels = c(
+        "Pre-implant + Week 1",
+        "Week 1 only",
+        "Pre-Implant only"
+      )
+    )
+  ) %>% 
+  arrange(ftr) %>% 
+  gt::gt() %>%
+  gt::cols_label(
+    ftr = '',
+    bstat = 'Scaled Brier Score',
+    calerr = 'Calibration error',
+    cstat = 'C-statistic'
+  ) %>% 
+  gt::cols_move_to_end('calerr') %>% 
+  gt::cols_align(align = 'center') %>% 
+  gt::cols_align(columns = 'ftr', align = 'left') %>% 
+  gt::fmt_number(columns = c('bstat', 'calerr', 'cstat'), decimals = 4) 
+  
+```
+
+# Variable importance
+
+```{r}
+
+importance <- map(
+  models,
+  .f = ~ as_tibble(xgb.importance(model = .x$model)) %>% 
+    dplyr::slice(1:15)
+)
+
+map(
+  .x = importance,
+  .f = ~ mutate(.x,
+    Feature=fct_inorder(Feature),
+    Feature=fct_rev(Feature)
+  ) %>% 
+  ggplot(aes(x=Feature, y = Gain)) + 
+  geom_point() + 
+  coord_flip()
+)
+
+```
+
+# Variable effects
+
+```{r}
+
+
+reci <- recipe(formulas$m0_w1, data = training) %>% 
+  step_nzv(all_predictors()) %>% 
+  #step_other(all_nominal(), threshold = 0.05) %>% 
+  step_dummy(all_nominal()) %>% 
+  prep()
+
+trn <- juice(reci)
+
+tst <- reci %>% bake(new_data = testing)
+
+var <- importance$m0_w1$Feature[1]
+
+end_points <- quantile(trn[[var]], probs = c(0.15, 0.85), na.rm=T)
+
+grid <- seq(end_points[1], end_points[2], length.out = 25)
+
+haz_mult <- models$m0_w1$bh %>% 
+  magrittr::extract(length(.))
+
+data_pd <- tibble(
+  prb_mean = rep(0, length(grid)),
+  prb_std = rep(0, length(grid))
+)
+
+for(i in seq_along(grid)){
+  
+  tmp <- tst 
+  tmp[[var]] <- grid[i]
+  
+  prds <- predict(
+    models$m0_w1$model, 
+    newdata = as.matrix(tmp)  
+  )
+  
+  prb <- exp(-exp(prds) * haz_mult)
+  
+  data_pd$prb_mean[i] <- mean(prb)
+  data_pd$prb_std[i] <- sd(prb) / sqrt(nrow(trn)-1)
+  
+}
+
+data_pd %>% 
+  mutate(
+    val = grid,
+    lwr = prb_mean - 1.96*prb_std,
+    upr = prb_mean + 1.96*prb_std
+  ) %>% 
+  ggplot(
+    aes(x=val, y=prb_mean, ymin=lwr, ymax=upr)
+  ) + 
+  geom_pointrange() + 
+  geom_line() +
+  labs(
+    x=var, 
+    y='Predicted survival probability at 1 year'
+  )
+
+
+```
+
+
+
+
