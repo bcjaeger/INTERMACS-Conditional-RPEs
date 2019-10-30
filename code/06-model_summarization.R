@@ -3,6 +3,7 @@ library(tidyverse)
 library(glue)
 library(ggrepel)
 library(pec)
+library(magrittr)
 
 outcome <- 'dead'
 model <- 'xgb'
@@ -108,17 +109,17 @@ plt <- ggplot(gg_dat, aes(x = time, y = cstat, fill = name)) +
   ) +
   geom_point(shape = 21, color = 'black', size = 5) + 
   labs(
-    x = 'Time since mechanical circulatory support was applied',
-    y = 'C-statistic for mortality events'
+    x = '\nTime since mechanical circulatory support was applied',
+    y = 'C-statistic for mortality events\n'
   ) + 
   theme_bw() +
   theme(
     legend.position = '', 
-    text = element_text(size = 12, face = 'bold'), 
+    text = element_text(size = 16, face = 'bold'), 
     panel.grid = element_blank()
   ) +
   scale_fill_brewer(type = 'qual', palette = 'Dark2') +
   scale_color_manual(values = cols)+
   expand_limits(x=5.5, y = c(0.65, 0.87))
 
-print(plt)
+write_rds(plt, glue('docs/figs/{outcome}_{model}_cstats.rds'))

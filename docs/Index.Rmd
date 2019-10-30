@@ -1,0 +1,280 @@
+---
+title: "Dynamic Risk Prediction with INTERMACS"
+author: "Byron C. Jaeger, Ryan S. Cantor, and Ramaraju Rudraraju"
+institute: "Kirklin Institute of Surgical Outcomes"
+date: "Nov. 16, 2019"
+output:
+  xaringan::moon_reader:
+    lib_dir: libs
+    nature:
+      highlightStyle: github
+      highlightLines: true
+      countIncrementalSlides: false
+---
+class: left, middle
+background-image: url(figs/tidy_up.jpeg)
+background-position: 100% 75%
+background-size: 55%
+
+```{r, echo=FALSE}
+
+options(htmltools.dir.version = FALSE)
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  fig.width = 9,
+  fig.height = 6,
+  dpi = 72 * 5,
+  cache = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+
+```
+
+
+# PART I: 
+
+# The life-changing <br/> magic of <strike>tidying</strike> <br/> following up
+
+---
+layout: true
+background-image: url(figs/intermacs_logo.jpg)
+background-position: 97.5% 2.5%
+background-size: 15%
+---
+
+# INTERMACS
+
+**What is it?**
+
+- The INTEragency Registry for Mechanically Assisted Circulatory Support.
+
+- Details...
+
+- More details!
+
+--
+
+**What questions can it answer?**
+
+- *Traditional:* Can historical patient data predict new patient outcomes?
+
+- *Novel:* Can <font color="red">follow-up data</font> improve outcome prediction?
+
+---
+layout: false
+background-image: url(figs/patient/Slide1.png)
+background-position: 50% 75%
+background-size: 100%
+
+# Patient Perspective
+
+As patient's live with mechanically assisted circulatory support,
+
+- they engage with a lot of uncertainty.
+
+---
+background-image: url(figs/patient/Slide2.png)
+background-position: 50% 75%
+background-size: 100%
+
+# Patient Perspective
+
+As patient's live with mechanically assisted circulatory support,
+
+- they want answers to important questions.
+
+---
+background-image: url(figs/patient/Slide3.png)
+background-position: 50% 75%
+background-size: 100%
+
+# Patient Perspective
+
+As patient's live with mechanically assisted circulatory support,
+
+- they ask questions that current risk prediction tools can't answer! 
+
+---
+
+# Why We Care About Follow-up
+
+**Things change after surgery**
+
+- adverse events happen (e.g., stroke, infection)
+
+- biomarkers change (e.g., bilirubin)
+
+--
+
+**Smarter care**
+
+- Patient care can be supported by monitoring risk for events (death, stroke, infection, malfunction).
+
+- Patients can receive interventions that are most likely to benefit them.
+
+---
+
+# Our Goals
+
+**Create**
+
+- INTERMACS wasn't designed for this analysis
+
+- Heavy data processing!
+
+--
+
+**Analyze**
+
+- Follow-up data haven't been used for risk prediction yet
+
+- A number of methods can be used - which works best?
+
+--
+
+**Communicate**
+
+- What can be gained in terms of risk prediction?
+
+- What variables are driving the changes in risk?
+
+- Explaining predictions at a patient-specific level.
+
+---
+layout: false
+class: center, middle
+
+# Our Work-flow 
+
+---
+background-image: url(figs/workflow.png)
+background-position: 50% 50%
+background-size: 100%
+
+---
+layout: false
+background-image: url(figs/intermacs_model_table.png)
+background-position: 50% 70%
+background-size: 80%
+
+# Gold Standard: The Expert's Model
+
+---
+layout: true
+
+# Testing the Expert
+---
+
+**What we did**
+
+- Made a risk prediction equation using the expert's selection of variables
+
+- Fit a Cox proportional hazard model using these variables at week 0, week 1, and week 4, separately.
+
+**How we tested**
+
+- Each model was used to predict risk for mortality in the `testing` data. 
+
+- Predictions were evaluated by computing a C-statistic
+
+- C-statistic $\approx$ probability that the model predicts higher risk for a patient who will die versus one who will not (at or before a specific time).
+
+---
+
+```{r}
+readr::read_rds('figs/dead_cph_cstats.rds')
+```
+
+---
+layout: false
+class: left, middle
+background-image: url(figs/cat_boost.jpg)
+background-position: 100% 75%
+background-size: 50%
+
+# PART II: 
+
+# Gimme a Boost!
+
+---
+layout: true
+background-image: url(figs/Rstudio.png)
+background-position: 97.5% 2.5%
+background-size: 15%
+---
+
+# Gradient boosting with R
+
+**What we used:** 
+
+`xgboost`, an R package for (extreme) boosting
+
+--
+
+**What we did**
+
+- Internally tested ~ 6,000 different tuning parameters.
+
+- 100-fold cross-validation on the training data.
+
+- Over 600,000 models fitted and evaluated (*thanks, PMP!*)
+
+--
+
+**What we got**
+
+- One very prognostic model.
+
+- A bunch of prognostic variables we didn't know about.
+
+- (side project) the `xgboost.surv` R package: software to make survival analyses with `xgboost` more user-friendly! ([Learn more here](https://bcjaeger.github.io/xgboost.surv/))
+
+---
+layout: false
+class: center, middle
+
+# How prognostic, you ask?
+
+---
+
+# Expert model
+
+```{r}
+readr::read_rds('figs/dead_cph_cstats.rds')
+```
+
+---
+
+# Boosted model
+
+```{r}
+readr::read_rds('figs/dead_xgb_cstats.rds')
+```
+
+---
+
+# Conclusions
+
+We have much more work to do!
+
+- Testing other modeling algorithms (e.g., random forest)
+
+- Variable importance
+
+- Variable effects
+
+- Using Shapley values to 
+
+    + explain predictions.
+    
+    + identify patient clusters
+    
+Want to contribute? 
+
+- [Follow our work!](https://github.com/bcjaeger/INTERMACS-Conditional-RPEs) 
+
+- Read our code, file issues, we want to hear your feedback!
+
+Thanks!!!
